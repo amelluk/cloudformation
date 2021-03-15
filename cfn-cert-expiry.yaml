@@ -1,0 +1,167 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+  This CloudFormation template sets up a Lambda function to monitor ACM certificate expiry dates at regular intervals,
+  and sends an SNS notification when it is about to expire. This is useful if you have imported certificates that are 
+  not renewed by ACM and you need to know if they are about to expire in good time.
+Parameters:
+  SnsTopicArn:
+    Description: The SNS topic ARN that notification messages will be sent to
+    Type: String
+    Default: 'arn:aws:sns:eu-west-2:xxxxxxxxxxxx:CertificateCheckEmail'
+  daysBeforeExpiry:
+    Description: The number of days before a certificate expiry date that you want to be notified of
+    Type: String
+    Default: 30
+  alwaysNotify:
+    Description: If set to False, the function will notify only when your certificate is about to expire
+    Type: String
+    Default: 'False'
+    AllowedValues:
+      - 'True'
+      - 'False'
+  LambdaRate:
+    Description: >
+      The rate or frequency that determines when Cloudwatch Events runs the rule that triggers the 
+      Lambda function. Can be a rate or cron expression as documented at 
+      https://docs.aws.amazon.com/AmazonCloudWatch/latest/events/ScheduledEvents.html
+    AllowedValues:
+      - rate(10 minutes)
+      - rate(60 minutes)
+      - rate(1 day)
+      - rate(7 days)
+      - cron(0 12 * * ? *)
+    Type: String
+    Default: rate(1 day)
+
+Resources:
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - lambda.amazonaws.com
+          Action:
+            - sts:AssumeRole  
+      Path: "/"
+      Policies:
+      - PolicyName: CELambdaFunctionPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - sns:Publish
+            Resource: 
+              - !Ref 'SnsTopicArn'
+          - Effect: Allow
+            Action:
+              - acm:ListCertificates
+              - acm:DescribeCertificate
+            Resource: '*'
+
+  LambdaSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: >
+        A schedule for the Lambda function
+      ScheduleExpression: !Ref LambdaRate
+      State: ENABLED
+      Targets:
+        - Arn: !Sub ${LambdaFunction.Arn}
+          Id: LambdaSchedule
+
+  LambdaSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Sub ${LambdaFunction.Arn}
+      Principal: 'events.amazonaws.com'
+      SourceArn: !Sub ${LambdaSchedule.Arn}
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.6
+      Timeout: 5
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          SnsTopicArn: !Ref SnsTopicArn
+          daysBeforeExpiry: !Ref daysBeforeExpiry
+          alwaysNotify: !Ref alwaysNotify
+
+      Code:
+        ZipFile:
+          !Sub
+            - |-
+                #!/usr/bin/env python3
+                import boto3, datetime,  json, os, urllib3
+                from base64 import b64decode
+
+                daysBeforeExpiry = int(os.environ['daysBeforeExpiry'])
+                alwaysNotify = eval(os.environ['alwaysNotify'])
+
+                # Main function
+                def lambda_handler(event, context):
+                    notify = False
+                    message = "Hello Support team,"
+                    acmClient = boto3.client('acm')
+                    
+                    # Get current time
+                    now = datetime.datetime.now()
+                    
+                    # Get list of certificates in ACM
+                    certificateList = acmClient.list_certificates()["CertificateSummaryList"]
+                    
+                    for certificate in certificateList:
+                        certificateDetails = acmClient.describe_certificate(CertificateArn=certificate["CertificateArn"])["Certificate"]
+                        
+                        if 'NotAfter' in certificateDetails:
+                            certificateExpiresIn = certificateDetails['NotAfter'].replace(tzinfo=None) - now
+                            certificateNotAfter = certificateDetails['NotAfter'].strftime("%m/%d/%Y, %H:%M:%S")
+                            
+                            if certificateExpiresIn <= datetime.timedelta(days = daysBeforeExpiry):
+                                message += "\nCertificate with Subject " +repr(certificateDetails['Subject']) + \
+                                " expires in " + repr(certificateExpiresIn.days) + " days on " + certificateNotAfter
+                                notify = True
+                            else:
+                                if alwaysNotify:
+                                    message += "\nCertificate with Subject " +repr(certificateDetails['Subject']) + \
+                                    " expires in " + repr(certificateExpiresIn.days) + " days on " + certificateNotAfter
+                                pass
+                        else:
+                            message += "\nCertificate with Subject " +repr(certificateDetails['Subject']) + \
+                                " has status: " + certificateDetails['Status']
+                        
+                    # Set subject for the notification depending whether its an alert or not
+                    if notify:
+                        snsSubject = 'ALERT: ACM Certificates Expiring Soon'
+                    else:
+                        snsSubject = 'INFO: ACM Certificates update'
+
+                    # Send notification
+                    if notify or alwaysNotify:
+                        # Send notification using SNS topic
+                        SnsClient = boto3.client('sns')
+                        response = SnsClient.publish(
+                            TopicArn= os.environ['SnsTopicArn'],
+                            Message= message,
+                            Subject= snsSubject,
+                            MessageStructure='string'
+                            )                        
+                    else:
+                        message += "\nNo certificates are expiring within " + repr (daysBeforeExpiry) + " days."
+                    print (message)
+            -
+               lambda_function_role_arn: !Ref LambdaExecutionRole
