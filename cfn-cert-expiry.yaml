@@ -132,13 +132,15 @@ Resources:
                             certificateNotAfter = certificateDetails['NotAfter'].strftime("%m/%d/%Y, %H:%M:%S")
                             
                             if certificateExpiresIn <= datetime.timedelta(days = daysBeforeExpiry):
-                                message += "\nCertificate with Subject " +repr(certificateDetails['Subject']) + \
-                                " expires in " + repr(certificateExpiresIn.days) + " days on " + certificateNotAfter
+                                message += "\n\nCertificate with Subject " +repr(certificateDetails['Subject']) + \
+                                " expires in " + repr(certificateExpiresIn.days) + " days on " + certificateNotAfter + \
+                                "\nARN =" +repr(certificateDetails['CertificateArn']) + " SAN =" +repr(certificateDetails['SubjectAlternativeNames'])
                                 notify = True
                             else:
                                 if alwaysNotify:
-                                    message += "\nCertificate with Subject " +repr(certificateDetails['Subject']) + \
-                                    " expires in " + repr(certificateExpiresIn.days) + " days on " + certificateNotAfter
+                                    message += "\n\nCertificate with Subject " +repr(certificateDetails['Subject']) + \
+                                    " expires in " + repr(certificateExpiresIn.days) + " days on " + certificateNotAfter + \
+                                    "\nARN = " +repr(certificateDetails['CertificateArn']) + " SAN = " +repr(certificateDetails['SubjectAlternativeNames'])
                                 pass
                         else:
                             message += "\nCertificate with Subject " +repr(certificateDetails['Subject']) + \
